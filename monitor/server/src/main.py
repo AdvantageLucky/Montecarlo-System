@@ -47,8 +47,7 @@ def consume_functions(functions: set):
             continue
 
         print(f"Funcion recibida: {func}")
-        if func not in functions:
-            functions.add(func)
+        functions.add(func)
 
 
 def update_scenarios_count(scenarios: dict, stop_event: threading.Event):

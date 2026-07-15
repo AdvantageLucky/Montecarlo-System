@@ -1,12 +1,12 @@
-from abc import ABC, abstractclassmethod
+from abc import ABC, abstractmethod
 
 
 class FunctionReader(ABC):
-    @abstractclassmethod
-    def load_functions(source: str): ...
+    @abstractmethod
+    def load_functions(self, source: str): ...
 
-    @abstractclassmethod
-    def read_function(): ...
+    @abstractmethod
+    def read_function(self) -> str: ...
 
-    @abstractclassmethod
-    def read_scenario(): ...
+    @abstractmethod
+    def read_scenario(self) -> str: ...

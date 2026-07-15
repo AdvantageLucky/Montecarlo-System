@@ -455,7 +455,7 @@ class Dashboard(ctk.CTk):
                     )
                     self.show_error_dialog(
                         "Error gRPC",
-                        f"No se pudo conectar iniciar servidor gRPC\n{e}",
+                        f"No se pudo iniciar el servidor gRPC\n{e}",
                     )
                     self.stop_grpc_server()
                     return
@@ -502,6 +502,9 @@ class Dashboard(ctk.CTk):
                             self.rabbitmq_connection.public_function(function)
                         except Exception:
                             self.is_running = False
+                            # descartamos la conexion muerta para forzar
+                            # una reconexion en el siguiente inicio
+                            self.rabbitmq_connection = None
                             self.after(
                                 0,
                                 lambda: self.show_error_dialog(
@@ -565,6 +568,9 @@ class Dashboard(ctk.CTk):
                             self.after(0, self.update_scenario_display)
                         except Exception:
                             self.is_running = False
+                            # descartamos la conexion muerta para forzar
+                            # una reconexion en el siguiente inicio
+                            self.rabbitmq_connection = None
                             self.after(
                                 0,
                                 lambda: self.show_error_dialog(

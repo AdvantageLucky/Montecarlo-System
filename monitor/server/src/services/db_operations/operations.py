@@ -50,7 +50,8 @@ class DBOperations:
         return user_results, published_functions
 
     def saveDB(self, buffer, functions):
-        if not buffer or not functions:
+        # solo omitimos el guardado si no hay absolutamente nada que persistir
+        if not buffer and not functions:
             return
 
         os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
