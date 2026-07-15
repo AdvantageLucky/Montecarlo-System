@@ -24,6 +24,16 @@ flowchart TB
     mapp -- "gRPC GetInformation (polling)" --> mserver
 ```
 
+Each process does one job:
+
+| Component | Job | Interface |
+|---|---|---|
+| `funcs_servicer/` | Publish the current function and generate random scenarios for it | GUI; produces to RabbitMQ; serves `FunctionService` over gRPC |
+| `funcs_consumer/` | Evaluate `f(scenario)` and report the result | Headless; consumes/produces RabbitMQ; calls `FunctionService` once at startup |
+| `monitor/server/` | Aggregate results and functions; count pending scenarios | Headless; consumes RabbitMQ; serves `InformationService` over gRPC; persists to CSV |
+| `monitor/app/` | Visualize the aggregated state | GUI; polls `InformationService` every second |
+| `monitor/shared_lib/` | Compiled `InformationService` protos shared by server and app | Editable dependency (`uv` workspace source) |
+
 ## Screenshots
 
 **Function and scenario generator (`funcs_servicer`)** — functions file loaded, publishing scenarios:
@@ -36,28 +46,70 @@ flowchart TB
 
 `funcs_consumer` and `monitor/server` are headless console programs.
 
-### Components
+## Messaging contracts
 
-| Component | Description |
-|---|---|
-| `funcs_servicer/` | GUI that loads a functions file (`fns.txt`), publishes the current function through the fanout exchange `exchange.models` and generates random scenarios (numpy) that it publishes to the `scenarios` queue. It also exposes a gRPC server (`FunctionService.GetFuncModel`) so a newly connected client can fetch the function currently in effect. |
-| `funcs_consumer/` | Headless client. Consumes the current function (its own `<ip>.models` queue, bound to the fanout, with `x-max-length=1`) and the scenarios (`scenarios` queue with fair dispatch). It parses the function with regex, evaluates it safely with `ast` (no `eval`) and publishes the result to the `results` queue, identifying itself with its IP. |
-| `monitor/server/` | Aggregation server. Consumes `results` and `functions`, counts the scenarios pending in the queue and exposes everything through gRPC (`InformationService.GetInformation`). On shutdown with `Ctrl+C` it persists its state to `database/results.csv`. |
-| `monitor/app/` | Dashboard (customtkinter + matplotlib) that polls the monitor's gRPC service and shows per-user cards, published functions, total scenarios and historical charts. |
-| `monitor/shared_lib/` | Shared library with the compiled `InformationService` protos, installed as an editable dependency in `server` and `app`. |
+Everything on the wire is JSON. One exchange, four kinds of queues:
 
-### Message flow
+| Name | Kind | Durable | Producer → Consumer | Payload |
+|---|---|---|---|---|
+| `exchange.models` | fanout exchange | yes | servicer → every bound queue | `"f(x,y)=x+y"` (JSON string) |
+| `<client-ip>.models` | queue, `x-max-length: 1` | no | fanout → one consumer | same as above |
+| `scenarios` | queue | no | servicer → consumers (competing) | `[0.83, 1.42]` (JSON array, one value per function variable) |
+| `results` | queue | yes | consumers → monitor/server | `{"user": "192.168.1.101", "result": 2.25}` |
+| `functions` | queue | yes | fanout → monitor/server | same payload as `exchange.models` |
 
-1. `funcs_servicer` publishes a function to the `exchange.models` fanout; when doing so it purges the `scenarios` queue (old scenarios no longer apply to the new function).
-2. Each `funcs_consumer` receives the function through its exclusive `<ip>.models` queue (max length 1: only the latest one matters).
-3. `funcs_servicer` publishes scenarios (lists of random values, one per function variable) to `scenarios`; with `prefetch_count=1` each scenario is processed by exactly one client.
-4. The client evaluates `f(scenario)` and publishes `{"user": ip, "result": value}` to `results` (persistent messages).
-5. `monitor/server` aggregates results per IP and `monitor/app` charts them.
+Design decisions behind those choices:
+
+- **Fanout for functions**: every consumer must know the current function, so functions are broadcast. Each consumer binds its own queue, named after its IP.
+- **`x-max-length: 1` on model queues**: only the *latest* function matters. If a consumer was offline during several publications, RabbitMQ keeps just the newest one.
+- **Competing consumers for scenarios**: scenarios are work items, not state. A single queue with `prefetch_count=1` (fair dispatch) means each scenario is evaluated exactly once, by whichever client is free.
+- **Purge on new function**: when the servicer publishes a new function it purges `scenarios`, because pending scenarios were sampled for the *previous* function's variable count and would no longer match.
+- **Durability follows the data's value**: `results` are the product of the whole system, so the queue is durable and messages persistent (`delivery_mode=2`). Scenarios are cheap to regenerate, so both queue and messages are transient.
+
+## gRPC services
+
+Two small request/response services, both taking `google.protobuf.Empty`:
+
+- **`FunctionService.GetFuncModel`** (served by `funcs_servicer`, protos in each project's `src/protos/`): returns `{function: string}` — the function currently in effect. Consumers call it once at startup so they don't have to wait for the next fanout publication.
+- **`InformationService.GetInformation`** (served by `monitor/server`, protos in `monitor/shared_lib/`): returns the full monitor state in one shot:
+
+  ```protobuf
+  message GetInformationResponse {
+    map<string, ResultList> user_results = 1;  // ip -> list of doubles
+    repeated string published_functions = 2;
+    int32 total_scenarios = 3;                 // messages currently in the 'scenarios' queue
+  }
+  ```
+
+  The dashboard polls this once per second; the server counts scenarios with a passive `queue_declare` (no side effects).
+
+## Persistence
+
+`monitor/server` keeps its state in memory and writes it to `monitor/server/database/results.csv` on shutdown (`Ctrl+C`), reloading it on the next start. The format is one row per user plus one special row:
+
+```csv
+"192.168.1.101","2.25","0.83","1.42"
+"functions","f(x,y)=x+y","f(x)=x^2"
+```
+
+Corrupt rows are skipped on load; an unreadable file falls back to an empty state.
+
+## The evaluator
+
+`funcs_consumer` never calls `eval()`. Incoming functions are:
+
+1. **Parsed** with a regex (`str_function_parser.py`): `f(x,y)=x+y` → variables `[x, y]` + expression `x+y`.
+2. **Compiled** to a Python `ast` tree and **walked** with an allowlist (`function_executer.py`): only `+ - * / % ^` (mapped to `**`) and unary minus over names and numeric constants. Any other node type is rejected, so a malicious "function" cannot execute code.
+3. **Evaluated** with the scenario values bound to the variables, in order. A scenario whose length doesn't match the variable count is discarded.
 
 ## Requirements
 
 - Python >= 3.14 and [uv](https://docs.astral.sh/uv/)
-- A reachable RabbitMQ broker (e.g. `docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:4-management`)
+- A reachable RabbitMQ broker, e.g.:
+
+  ```bash
+  docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:4-management
+  ```
 
 ## Configuration
 
@@ -74,25 +126,27 @@ Each component reads its own `.env` (see the `.env.example` in each folder):
 
 ## Running
 
-Each component runs from its own folder:
+Start the broker first, then each component from its own folder (any order works — every component reconnects on its own schedule, but this order avoids startup noise):
 
 ```bash
 # 1. Function and scenario generator (GUI)
 cd funcs_servicer
 uv run python -m src.App
 
-# 2. One or more evaluator clients
-cd funcs_consumer
+# 2. Monitoring server (cache/aggregator)
+cd monitor/server
 uv run python -m src.main
 
-# 3. Monitoring server (cache/aggregator)
-cd monitor/server
+# 3. One or more evaluator clients
+cd funcs_consumer
 uv run python -m src.main
 
 # 4. Monitoring dashboard (GUI)
 cd monitor/app
 uv run python -m src.App
 ```
+
+In the servicer: load a functions file, adjust the publication intervals with the sliders, and press *Iniciar publicacion*. In the dashboard: press *Iniciar Monitoreo*.
 
 ## Functions file format
 
@@ -104,6 +158,8 @@ f(x)=x^2,binomial
 f(x,y,z)=x*y*z,exponential
 ```
 
-- Variables: the ones declared inside the parentheses; the generated scenario will have one value per variable.
+- Variables: the ones declared inside the parentheses; each published scenario carries one sampled value per variable.
 - Operators supported by the evaluator: `+ - * / % ^` (power) and unary negation.
-- Supported distributions: `normal`, `binomial`, `poisson`, `uniform`, `exponential`, `gamma`, `beta`, `geometric`, `lognormal`.
+- Distributions (numpy, with fixed default parameters): `normal`, `binomial`, `poisson`, `uniform`, `exponential`, `gamma`, `beta`, `geometric`, `lognormal`. An unknown distribution is reported in the servicer UI and no scenario is generated.
+
+The servicer cycles through the file's functions round-robin, one per *Intervalo de Funciones* tick, and generates a scenario for the current function every *Intervalo de Generacion* tick.
