@@ -29,6 +29,18 @@ Distributed Monte Carlo simulation system. A server publishes mathematical funct
                  └────────────────┘           └──────────────┘
 ```
 
+## Screenshots
+
+**Function and scenario generator (`funcs_servicer`)** — functions file loaded, publishing scenarios:
+
+![funcs_servicer](docs/img/funcs_servicer.png)
+
+**Monitoring dashboard (`monitor/app`)** — per-user results, published functions and scenario totals:
+
+![monitor app](docs/img/monitor_app.png)
+
+`funcs_consumer` and `monitor/server` are headless console programs.
+
 ### Components
 
 | Component | Description |
