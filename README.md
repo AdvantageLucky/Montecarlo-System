@@ -4,29 +4,24 @@ Distributed Monte Carlo simulation system. A server publishes mathematical funct
 
 ## Architecture
 
-```
-                       ┌──────────────────┐
-                       │  funcs_servicer  │  GUI (customtkinter)
-                       │   (publisher)    │  Publishes functions and scenarios
-                       └────────┬─────────┘
-                    exchange    │    queue
-                "exchange.models"    "scenarios"
-                       (fanout) │
-                       ┌────────▼─────────┐
-                       │     RabbitMQ     │
-                       └────────┬─────────┘
-                                │  "<ip>.models" and "scenarios" queues
-                 ┌──────────────┼──────────────┐
-        ┌────────▼───────┐ ┌────▼───────────┐  ...
-        │ funcs_consumer │ │ funcs_consumer │   N clients
-        │  (evaluator)   │ │  (evaluator)   │
-        └────────┬───────┘ └────┬───────────┘
-                 │   "results" queue
-                 └───────┬──────┘
-                 ┌───────▼────────┐   gRPC    ┌──────────────┐
-                 │ monitor/server │◄──────────│ monitor/app  │
-                 │ (cache + gRPC) │           │ (dashboard)  │
-                 └────────────────┘           └──────────────┘
+```mermaid
+flowchart TB
+    servicer["funcs_servicer<br/>(GUI publisher)"]
+    rabbit[("RabbitMQ")]
+    consumer1["funcs_consumer #1<br/>(evaluator)"]
+    consumerN["funcs_consumer #N<br/>(evaluator)"]
+    mserver["monitor/server<br/>(cache + gRPC)"]
+    mapp["monitor/app<br/>(dashboard)"]
+
+    servicer -- "functions → exchange.models (fanout)" --> rabbit
+    servicer -- "scenarios → 'scenarios' queue" --> rabbit
+    rabbit -- "'&lt;ip&gt;.models' + 'scenarios'" --> consumer1
+    rabbit -- "'&lt;ip&gt;.models' + 'scenarios'" --> consumerN
+    consumer1 -- "results → 'results' queue" --> rabbit
+    consumerN -- "results → 'results' queue" --> rabbit
+    rabbit -- "'results' + 'functions'" --> mserver
+    consumer1 -. "gRPC GetFuncModel (initial function)" .-> servicer
+    mapp -- "gRPC GetInformation (polling)" --> mserver
 ```
 
 ## Screenshots
